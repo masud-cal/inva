@@ -1,22 +1,52 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Mic, MicOff, Plus, ClipboardList, AlertTriangle } from 'lucide-react';
+import { supabase } from './supabase';
 
 const VoiceInventoryApp = () => {
   // State management
-  const [inventory, setInventory] = useState([
-    { id: 1, name: 'Syringes', quantity: 25, unit: 'pieces', lowStock: 10, lastUpdated: new Date() },
-    { id: 2, name: 'Bandages', quantity: 15, unit: 'rolls', lowStock: 5, lastUpdated: new Date() },
-    { id: 3, name: 'Lidocaine', quantity: 8, unit: 'vials', lowStock: 3, lastUpdated: new Date() },
-    { id: 4, name: 'Gloves', quantity: 50, unit: 'pairs', lowStock: 20, lastUpdated: new Date() },
-    { id: 5, name: 'Gauze', quantity: 12, unit: 'packs', lowStock: 5, lastUpdated: new Date() }
-  ]);
-
+  const [inventory, setInventory] = useState([]);
+  const [loading, setLoading] = useState(true);
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('Your voice command will appear here...');
   const [status, setStatus] = useState('Click the button and speak your inventory update');
   const [updatedItemId, setUpdatedItemId] = useState(null);
 
   const recognitionRef = useRef(null);
+
+  // Fetch inventory from Supabase
+  const fetchInventory = async () => {
+    try {
+      setLoading(true);
+      const { data, error } = await supabase
+        .from('inventory')
+        .select('*')
+        .order('created_at', { ascending: true });
+
+      if (error) throw error;
+      
+      // Convert snake_case to camelCase for consistency
+      const formattedData = data.map(item => ({
+        id: item.id,
+        name: item.name,
+        quantity: item.quantity,
+        unit: item.unit,
+        lowStock: item.low_stock,
+        lastUpdated: new Date(item.last_updated)
+      }));
+      
+      setInventory(formattedData);
+    } catch (error) {
+      console.error('Error fetching inventory:', error);
+      setStatus('Error loading inventory data');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Load inventory when component mounts
+  useEffect(() => {
+    fetchInventory();
+  }, []);
 
   // Initialize speech recognition
   useEffect(() => {
@@ -93,33 +123,51 @@ const VoiceInventoryApp = () => {
     }
   };
 
-  // Update inventory
-  const updateInventory = (itemName, quantity, isAdding = false) => {
+  // Update inventory in Supabase
+  const updateInventory = async (itemName, quantity, isAdding = false) => {
     const item = inventory.find(inv => 
       inv.name.toLowerCase().includes(itemName) || 
       itemName.includes(inv.name.toLowerCase())
     );
     
     if (item) {
-      setInventory(prevInventory => 
-        prevInventory.map(inv => 
-          inv.id === item.id 
-            ? {
-                ...inv,
-                quantity: isAdding ? inv.quantity + quantity : Math.max(0, inv.quantity - quantity),
-                lastUpdated: new Date()
-              }
-            : inv
-        )
-      );
-
-      const action = isAdding ? 'Added' : 'Used';
       const newQuantity = isAdding ? item.quantity + quantity : Math.max(0, item.quantity - quantity);
-      setStatus(`✅ ${action} ${quantity} ${item.name}. Stock: ${item.quantity} → ${newQuantity}`);
       
-      // Highlight updated item
-      setUpdatedItemId(item.id);
-      setTimeout(() => setUpdatedItemId(null), 2000);
+      try {
+        // Update in Supabase
+        const { error } = await supabase
+          .from('inventory')
+          .update({ 
+            quantity: newQuantity,
+            last_updated: new Date().toISOString()
+          })
+          .eq('id', item.id);
+
+        if (error) throw error;
+
+        // Update local state
+        setInventory(prevInventory => 
+          prevInventory.map(inv => 
+            inv.id === item.id 
+              ? {
+                  ...inv,
+                  quantity: newQuantity,
+                  lastUpdated: new Date()
+                }
+              : inv
+          )
+        );
+
+        const action = isAdding ? 'Added' : 'Used';
+        setStatus(`✅ ${action} ${quantity} ${item.name}. Stock: ${item.quantity} → ${newQuantity}`);
+        
+        // Highlight updated item
+        setUpdatedItemId(item.id);
+        setTimeout(() => setUpdatedItemId(null), 2000);
+      } catch (error) {
+        console.error('Error updating inventory:', error);
+        setStatus(`❌ Failed to update ${item.name}. Please try again.`);
+      }
     } else {
       const availableItems = inventory.map(i => i.name).join(', ');
       setStatus(`❌ Item "${itemName}" not found. Available items: ${availableItems}`);
@@ -140,27 +188,49 @@ const VoiceInventoryApp = () => {
     }
   };
 
-  // Add sample item
-  const addSampleItem = () => {
-    const newItem = {
-      id: Math.max(...inventory.map(i => i.id)) + 1,
-      name: `Sample Item ${inventory.length + 1}`,
-      quantity: 20,
-      unit: 'pieces',
-      lowStock: 5,
-      lastUpdated: new Date()
-    };
-    setInventory([...inventory, newItem]);
+  // Add sample item to Supabase
+  const addSampleItem = async () => {
+    try {
+      const newItem = {
+        name: `Sample Item ${inventory.length + 1}`,
+        quantity: 20,
+        unit: 'pieces',
+        low_stock: 5,
+        last_updated: new Date().toISOString()
+      };
+
+      const { data, error } = await supabase
+        .from('inventory')
+        .insert([newItem])
+        .select();
+
+      if (error) throw error;
+
+      // Update local state
+      const formattedItem = {
+        id: data[0].id,
+        name: data[0].name,
+        quantity: data[0].quantity,
+        unit: data[0].unit,
+        lowStock: data[0].low_stock,
+        lastUpdated: new Date(data[0].last_updated)
+      };
+
+      setInventory([...inventory, formattedItem]);
+      setStatus(`✅ Added ${formattedItem.name} to inventory`);
+    } catch (error) {
+      console.error('Error adding item:', error);
+      setStatus('❌ Failed to add item. Please try again.');
+    }
   };
 
-  // UI components
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 p-4">
       <div className="max-w-6xl mx-auto bg-white rounded-3xl shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="bg-gradient-to-r from-indigo-600 to-purple-700 text-white p-8 text-center">
           <div className="flex items-center justify-center gap-4">
-            <ClipboardList size={58} />
+            <ClipboardList size={48} />
             <h1 className="text-6xl font-bold">Inventory Assistant</h1>
           </div>
         </div>
@@ -228,7 +298,16 @@ const VoiceInventoryApp = () => {
           </div>
 
           <div className="bg-white rounded-xl shadow-lg overflow-hidden">
-            <table className="w-full">
+            {loading ? (
+              <div className="p-8 text-center text-gray-500">
+                Loading inventory...
+              </div>
+            ) : inventory.length === 0 ? (
+              <div className="p-8 text-center text-gray-500">
+                No inventory items found. Add some items to get started!
+              </div>
+            ) : (
+              <table className="w-full">
               <thead>
                 <tr className="bg-gray-50 border-b-2 border-gray-200">
                   <th className="text-left p-6 font-semibold text-gray-700">Item Name</th>
@@ -270,6 +349,7 @@ const VoiceInventoryApp = () => {
                 ))}
               </tbody>
             </table>
+            )}
           </div>
 
           {/* Low Stock Alerts */}
